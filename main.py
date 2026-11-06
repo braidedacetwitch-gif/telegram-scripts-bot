@@ -48,11 +48,6 @@ def clean_keys(row: dict) -> dict:
     }
 
 
-def yes_no(value: str) -> str:
-    value = clean(value)
-    return "Да" if value in ("yes", "да", "1", "true") else "Нет"
-
-
 def injector_text(value: str) -> str:
     value = clean(value)
 
@@ -127,19 +122,16 @@ async def load_scripts() -> list[dict]:
     return scripts
 
 
-async def get_active_games(include_injectors: bool = False) -> list[str]:
+async def get_active_games() -> list[str]:
     scripts = await load_scripts()
 
-    games = {
+    return sorted({
         item["game"]
         for item in scripts
-        if item["active"] and item["game"]
-    }
-
-    if include_injectors and INJECTORS_NAME in games:
-        games.remove(INJECTORS_NAME)
-
-    return sorted(games)
+        if item["active"]
+        and item["game"]
+        and item["game"] != INJECTORS_NAME
+    })
 
 
 async def get_active_injectors() -> list[str]:
@@ -241,7 +233,7 @@ async def send_games_page(
     edit: bool = False,
 ):
     try:
-        games = await get_active_games(include_injectors=True)
+        games = await get_active_games()
     except Exception:
         logger.exception("Ошибка чтения Google Таблицы")
 
@@ -684,19 +676,25 @@ async def send_scripts_page(
     end = start + SCRIPTS_PER_PAGE
     page_scripts = scripts[start:end]
 
+    is_injector = name == INJECTORS_NAME
+
     text = f"<b>Скрипты для {name}</b>\n\n"
     text += f"Страница {page + 1} из {total_pages}\n\n"
 
     for number, item in enumerate(page_scripts, start=start + 1):
-        key_text = "Да" if item["key"] else "Нет"
-        mobile_text = "Да" if item["mobile"] else "Нет"
+        text += f"<b>{number}. {item['title']}</b>\n"
 
-        text += (
-            f"<b>{number}. {item['title']}</b>\n"
-            f"Ключ: {key_text}\n"
-            f"Инжектор: {item['injector']}\n"
-            f"Мобильные: {mobile_text}\n\n"
-        )
+        if not is_injector:
+            key_text = "Да" if item["key"] else "Нет"
+            mobile_text = "Да" if item["mobile"] else "Нет"
+
+            text += (
+                f"Ключ: {key_text}\n"
+                f"Инжектор: {item['injector']}\n"
+                f"Мобильные: {mobile_text}\n\n"
+            )
+        else:
+            text += "\n"
 
     keyboard = scripts_keyboard(
         name,
@@ -796,18 +794,25 @@ async def script_details(
         await query.message.reply_text("Скрипт не найден.")
         return
 
-    key_text = "Да" if item["key"] else "Нет"
-    mobile_text = "Да" if item["mobile"] else "Нет"
+    is_injector = item["game"] == INJECTORS_NAME
 
     text = (
         f"<b>{item['title']}</b>\n\n"
         f"<b>Игра:</b> {item['game']}\n"
-        f"<b>Описание:</b> {item['description'] or 'Не указано'}\n"
-        f"<b>Нужен ключ:</b> {key_text}\n"
-        f"<b>Инжектор:</b> {item['injector']}\n"
-        f"<b>Мобильные:</b> {mobile_text}\n\n"
-        f"<a href='{item['link']}'>Открыть скрипт</a>"
+        f"<b>Описание:</b> {item['description'] or 'Не указано'}\n\n"
     )
+
+    if not is_injector:
+        key_text = "Да" if item["key"] else "Нет"
+        mobile_text = "Да" if item["mobile"] else "Нет"
+
+        text += (
+            f"<b>Нужен ключ:</b> {key_text}\n"
+            f"<b>Инжектор:</b> {item['injector']}\n"
+            f"<b>Мобильные:</b> {mobile_text}\n\n"
+        )
+
+    text += f"<a href='{item['link']}'>Открыть скрипт</a>"
 
     await query.message.reply_text(
         text,
