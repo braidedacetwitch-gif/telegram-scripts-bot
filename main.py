@@ -27,6 +27,7 @@ TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_USERNAME"]
 SHEET_CSV_URL = os.environ["SHEET_CSV_URL"]
 RENDER_URL = os.environ["RENDER_URL"]
+USERS_URL = os.environ.get("USERS_URL", "")
 
 GAMES_PER_PAGE = 8
 SCRIPTS_PER_PAGE = 5
@@ -73,6 +74,28 @@ async def is_subscribed(user_id: int) -> bool:
     except Exception:
         logger.exception("Ошибка проверки подписки")
         return False
+
+
+async def save_user(update: Update):
+    if not USERS_URL:
+        return
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    payload = {
+        "user_id": user.id,
+        "username": user.username or "",
+        "first_name": user.first_name or "",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(USERS_URL, json=payload)
+    except Exception:
+        logger.exception("Ошибка сохранения пользователя")
 
 
 async def load_scripts() -> list[dict]:
@@ -316,6 +339,8 @@ async def send_injectors_page(
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await save_user(update)
+
     user_id = update.effective_user.id
 
     if not await is_subscribed(user_id):
@@ -365,10 +390,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await save_user(update)
     await send_games_page(update, page=0)
 
 
 async def injectors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await save_user(update)
     await send_injectors_page(update, page=0)
 
 
@@ -395,6 +422,8 @@ async def check_subscription(
 ):
     query = update.callback_query
     await query.answer()
+
+    await save_user(update)
 
     if await is_subscribed(query.from_user.id):
         await query.edit_message_text(
@@ -423,6 +452,8 @@ async def check_subscription(
 
 
 async def script(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await save_user(update)
+
     user_id = update.effective_user.id
     logger.info(
         "Получена команда /script от %s: %s",
@@ -516,6 +547,8 @@ async def game_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    await save_user(update)
+
     data = query.data.replace("game:", "", 1)
     page_text, game = data.split(":", 1)
     page = int(page_text)
@@ -562,6 +595,8 @@ async def injector_button(
 ):
     query = update.callback_query
     await query.answer()
+
+    await save_user(update)
 
     data = query.data.replace("injector:", "", 1)
     page_text, injector = data.split(":", 1)
@@ -725,6 +760,8 @@ async def scripts_page(
     query = update.callback_query
     await query.answer()
 
+    await save_user(update)
+
     data = query.data.replace("scripts_page:", "", 1)
     name, page_text = data.rsplit(":", 1)
     page = int(page_text)
@@ -767,6 +804,8 @@ async def script_details(
 ):
     query = update.callback_query
     await query.answer()
+
+    await save_user(update)
 
     script_id = query.data.replace("details:", "", 1)
 
@@ -824,6 +863,8 @@ async def script_details(
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
+    await save_user(update)
+
     await update.message.reply_text(
         "Как пользоваться ботом:\n\n"
         "/start — главное меню и выбор игры\n"
