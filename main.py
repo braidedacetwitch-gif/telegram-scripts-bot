@@ -12,6 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -35,7 +36,7 @@ telegram_app = Application.builder().token(TOKEN).build()
 
 
 def clean(value) -> str:
-    return str(value or "").replace("\ufeff", "").strip().lower()
+    return str(value or "").replace("\\ufeff", "").strip().lower()
 
 
 def clean_keys(row: dict) -> dict:
@@ -43,6 +44,29 @@ def clean_keys(row: dict) -> dict:
         clean(key): value
         for key, value in row.items()
     }
+
+
+def yes_no(value: str) -> str:
+    value = clean(value)
+    return "Да" if value in ("yes", "да", "1", "true") else "Нет"
+
+
+def injector_text(value: str) -> str:
+    value = clean(value)
+
+    if value in ("both", "оба", "solara+xeno", "solara xeno"):
+        return "Solara / Xeno"
+
+    if value == "solara":
+        return "Solara"
+
+    if value == "xeno":
+        return "Xeno"
+
+    if value in ("none", "нет", "-"):
+        return "Не указан"
+
+    return value.title() if value else "Не указан"
 
 
 async def is_subscribed(user_id: int) -> bool:
@@ -70,15 +94,28 @@ async def load_scripts() -> list[dict]:
     for raw_row in reader:
         row = clean_keys(raw_row)
 
+        script_id = clean(row.get("id"))
         game = clean(row.get("game"))
         title = clean(row.get("title"))
         link = clean(row.get("link"))
+        description = clean(row.get("description"))
+        key_required = clean(row.get("key"))
+        injector = clean(row.get("injector"))
+        mobile = clean(row.get("mobile"))
         active = clean(row.get("active"))
 
+        if not game or not title or not link:
+            continue
+
         scripts.append({
+            "id": script_id,
             "game": game,
             "title": title,
             "link": link,
+            "description": description,
+            "key": key_required in ("yes", "да", "1", "true"),
+            "injector": injector_text(injector),
+            "mobile": mobile in ("yes", "да", "1", "true"),
             "active": active in ("yes", "да", "1", "true"),
         })
 
@@ -148,13 +185,9 @@ async def send_games_page(
         logger.exception("Ошибка чтения Google Таблицы")
 
         text = "Не удалось загрузить список игр. Попробуй позже."
-        keyboard = None
 
         if edit:
-            await update_or_query.edit_message_text(
-                text,
-                reply_markup=keyboard,
-            )
+            await update_or_query.edit_message_text(text)
         else:
             await update_or_query.message.reply_text(text)
 
@@ -166,7 +199,7 @@ async def send_games_page(
     else:
         total_pages = math.ceil(len(games) / GAMES_PER_PAGE)
         text = (
-            f"Выбери игру:\n\n"
+            f"Выбери игру:\\n\\n"
             f"Страница {page + 1} из {total_pages}"
         )
         keyboard = games_keyboard(games, page)
@@ -210,9 +243,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Привет!\n\n"
-        "Выбери игру кнопкой или отправь команду:\n"
-        "/script blox fruits"
+        "Привет!\\n"
+        "Выбери игру кнопкой или отправь команду:\\n"
+        "/script blox fruits\\n\\n"
+        "Как пользоваться ботом —\\n"
+        "/help"
     )
 
     await send_games_page(update, page=0)
@@ -238,8 +273,8 @@ async def check_subscription(
 
     if await is_subscribed(query.from_user.id):
         await query.edit_message_text(
-            "Спасибо за подписку!\n\n"
-            "Теперь выбери игру или отправь команду:\n"
+            "Спасибо за подписку!\\n\\n"
+            "Теперь выбери игру или отправь команду:\\n"
             "/script blox fruits"
         )
         await send_games_page(update, page=0)
@@ -304,7 +339,7 @@ async def script(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if similar:
             await update.message.reply_text(
-                f"По запросу «{game_query}» ничего не найдено.\n"
+                f"По запросу «{game_query}» ничего не найдено.\\n"
                 "Возможно, ты имел в виду:",
                 reply_markup=InlineKeyboardMarkup([
                     [
@@ -318,7 +353,7 @@ async def script(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                f"По запросу «{game_query}» скрипты не найдены.\n"
+                f"По запросу «{game_query}» скрипты не найдены.\\n"
                 "Отправь /games, чтобы увидеть доступные игры."
             )
 
@@ -379,10 +414,28 @@ async def game_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def scripts_keyboard(
     game: str,
+    scripts: list[dict],
     total_pages: int,
     page: int,
 ) -> InlineKeyboardMarkup:
     buttons = []
+
+    start = page * SCRIPTS_PER_PAGE
+    page_scripts = scripts[start:start + SCRIPTS_PER_PAGE]
+
+    for item in page_scripts:
+        script_id = item["id"] or item["title"][:20]
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"📄 {item['title']}",
+                callback_data=f"details:{script_id}"
+            ),
+            InlineKeyboardButton(
+                "🔗 Открыть",
+                url=item["link"]
+            ),
+        ])
 
     navigation = []
 
@@ -429,24 +482,39 @@ async def send_scripts_page(
     end = start + SCRIPTS_PER_PAGE
     page_scripts = scripts[start:end]
 
-    text = f"Скрипты для {game}:\n\n"
-    text += f"Страница {page + 1} из {total_pages}\n\n"
+    text = f"<b>Скрипты для {game}</b>\\n\\n"
+    text += f"Страница {page + 1} из {total_pages}\\n\\n"
 
-    for item in page_scripts:
-        text += f"{item['title']}\n{item['link']}\n\n"
+    for number, item in enumerate(page_scripts, start=start + 1):
+        key_text = "Да" if item["key"] else "Нет"
+        mobile_text = "Да" if item["mobile"] else "Нет"
 
-    keyboard = scripts_keyboard(game, total_pages, page)
+        text += (
+            f"<b>{number}. {item['title']}</b>\\n"
+            f"Ключ: {key_text}\\n"
+            f"Инжектор: {item['injector']}\\n"
+            f"Мобильные: {mobile_text}\\n\\n"
+        )
+
+    keyboard = scripts_keyboard(
+        game,
+        scripts,
+        total_pages,
+        page,
+    )
 
     if edit:
         await update_or_query.edit_message_text(
             text,
             reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
     else:
         await update_or_query.message.reply_text(
             text,
             reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
 
@@ -490,17 +558,69 @@ async def scripts_page(
     )
 
 
+async def script_details(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    script_id = query.data.replace("details:", "", 1)
+
+    try:
+        scripts = await load_scripts()
+    except Exception:
+        logger.exception("Ошибка чтения Google Таблицы")
+        await query.message.reply_text(
+            "Не удалось загрузить описание скрипта."
+        )
+        return
+
+    item = next(
+        (
+            s for s in scripts
+            if s["active"] and (
+                s["id"] == script_id
+                or clean(s["title"])[:20] == script_id
+            )
+        ),
+        None,
+    )
+
+    if not item:
+        await query.message.reply_text("Скрипт не найден.")
+        return
+
+    key_text = "Да" if item["key"] else "Нет"
+    mobile_text = "Да" if item["mobile"] else "Нет"
+
+    text = (
+        f"<b>{item['title']}</b>\\n\\n"
+        f"<b>Игра:</b> {item['game']}\\n"
+        f"<b>Описание:</b> {item['description'] or 'Не указано'}\\n"
+        f"<b>Нужен ключ:</b> {key_text}\\n"
+        f"<b>Инжектор:</b> {item['injector']}\\n"
+        f"<b>Мобильные:</b> {mobile_text}\\n\\n"
+        f"<a href=\\"{item['link']}\\">Открыть скрипт</a>"
+    )
+
+    await query.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     await update.message.reply_text(
-        "Как пользоваться ботом:\n\n"
-        "/start — главное меню и выбор игры\n"
-        "/games — список доступных игр\n"
-        "/script blox fruits — найти скрипты по названию\n"
-        "/help — эта справка\n\n"
-        "Пример:\n"
-        "/script blox fruits"
+        "Как пользоваться ботом:\\n\\n"
+        "/start — главное меню и выбор игры\\n"
+        "/games — список доступных игр\\n"
+        "/script blox fruits — найти скрипты по названию\\n"
+        "/help — эта справка\\n\\n"
+        "Нажми «Подробнее», чтобы увидеть функции скрипта, "
+        "нужен ли ключ, поддержку Solara/Xeno и мобильных устройств."
     )
 
 
@@ -520,6 +640,9 @@ telegram_app.add_handler(
 )
 telegram_app.add_handler(
     CallbackQueryHandler(scripts_page, pattern="^scripts_page:")
+)
+telegram_app.add_handler(
+    CallbackQueryHandler(script_details, pattern="^details:")
 )
 
 
