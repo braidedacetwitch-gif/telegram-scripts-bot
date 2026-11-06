@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import logging
@@ -28,6 +29,12 @@ CHANNEL = os.environ["CHANNEL_USERNAME"]
 SHEET_CSV_URL = os.environ["SHEET_CSV_URL"]
 RENDER_URL = os.environ["RENDER_URL"]
 USERS_URL = os.environ.get("USERS_URL", "")
+
+ADMIN_IDS = {
+    int(admin_id)
+    for admin_id in os.environ.get("ADMIN_IDS", "").split(",")
+    if admin_id.strip().isdigit()
+}
 
 GAMES_PER_PAGE = 8
 SCRIPTS_PER_PAGE = 5
@@ -877,11 +884,160 @@ async def help_command(
     )
 
 
+async def get_user_ids() -> list[int]:
+    async with httpx.AsyncClient(
+        timeout=15,
+        follow_redirects=True
+    ) as client:
+        response = await client.get(USERS_URL)
+        response.raise_for_status()
+
+    return [
+        int(line.strip())
+        for line in response.text.splitlines()
+        if line.strip().isdigit()
+    ]
+
+
+async def broadcast_photo(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    await save_user(update)
+
+    user_id = update.effective_user.id
+
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Команда недоступна.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Формат команды:\n\n"
+            "/broadcast_photo ССЫЛКА_НА_ФОТО | ТЕКСТ | "
+            "ТЕКСТ_КНОПКИ | ССЫЛКА_КНОПКИ"
+        )
+        return
+
+    raw_text = " ".join(context.args)
+    parts = [part.strip() for part in raw_text.split("|")]
+
+    if len(parts) != 4:
+        await update.message.reply_text(
+            "Нужно ровно 4 части через |:\n\n"
+            "/broadcast_photo ССЫЛКА_НА_ФОТО | ТЕКСТ | "
+            "ТЕКСТ_КНОПКИ | ССЫЛКА_КНОПКИ"
+        )
+        return
+
+    photo_url, caption, button_text, button_url = parts
+
+    if not photo_url.startswith(("http://", "https://")):
+        await update.message.reply_text(
+            "Ссылка на фото должна начинаться с http:// или https://"
+        )
+        return
+
+    if not button_url.startswith(("http://", "https://")):
+        await update.message.reply_text(
+            "Ссылка кнопки должна начинаться с http:// или https://"
+        )
+        return
+
+    try:
+        user_ids = await get_user_ids()
+    except Exception:
+        logger.exception("Ошибка получения пользователей")
+        await update.message.reply_text(
+            "Не удалось получить список пользователей."
+        )
+        return
+
+    if not user_ids:
+        await update.message.reply_text(
+            "В базе пока нет пользователей."
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                button_text,
+                url=button_url
+            )
+        ]
+    ])
+
+    status_message = await update.message.reply_text(
+        f"Начинаю рассылку.\nПользователей: {len(user_ids)}"
+    )
+
+    sent = 0
+    failed = 0
+
+    for recipient_id in user_ids:
+        try:
+            await telegram_app.bot.send_photo(
+                chat_id=recipient_id,
+                photo=photo_url,
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            sent += 1
+        except Exception as error:
+            failed += 1
+            logger.warning(
+                "Не удалось отправить %s: %s",
+                recipient_id,
+                error,
+            )
+
+        await asyncio.sleep(1.1)
+
+    await status_message.edit_text(
+        f"Рассылка завершена.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Ошибок: {failed}"
+    )
+
+
+async def admin_help(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    await save_user(update)
+
+    user_id = update.effective_user.id
+
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Команда недоступна.")
+        return
+
+    await update.message.reply_text(
+        "<b>Мануал администратора</b>\n\n"
+        "<b>Рассылка с фото и кнопкой</b>\n"
+        "<code>/broadcast_photo ССЫЛКА_НА_ФОТО | ТЕКСТ | "
+        "ТЕКСТ_КНОПКИ | ССЫЛКА_КНОПКИ</code>\n\n"
+        "<b>Пример:</b>\n"
+        "<code>/broadcast_photo https://example.com/banner.jpg | "
+        "Новые скрипты уже добавлены! | Открыть бота | "
+        "https://t.me/твой_бот</code>\n\n"
+        "<b>Правила:</b>\n"
+        "• Используй ровно 3 разделителя <code>|</code>.\n"
+        "• Ссылка на фото должна быть прямой: .jpg, .png или .webp.\n"
+        "• Ссылка кнопки должна начинаться с https://.\n"
+        "• Текст подписи — до 1024 символов.\n"
+        "• Рассылка идёт с паузой 1.1 секунды на пользователя.\n\n"
+        "<b>Кому доступно:</b>\n"
+        "Только ID из переменной <code>ADMIN_IDS</code>."
+    )
+
+
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("games", games))
 telegram_app.add_handler(CommandHandler("injectors", injectors))
 telegram_app.add_handler(CommandHandler("script", script))
 telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(CommandHandler("broadcast_photo", broadcast_photo))
+telegram_app.add_handler(CommandHandler("adminhelp", admin_help))
 
 telegram_app.add_handler(
     CallbackQueryHandler(check_subscription, pattern="^check_sub$")
