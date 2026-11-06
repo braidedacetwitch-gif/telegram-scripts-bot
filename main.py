@@ -1,12 +1,17 @@
 import csv
 import io
 import logging
+import math
 import os
 
 import httpx
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -22,12 +27,22 @@ CHANNEL = os.environ["CHANNEL_USERNAME"]
 SHEET_CSV_URL = os.environ["SHEET_CSV_URL"]
 RENDER_URL = os.environ["RENDER_URL"]
 
+GAMES_PER_PAGE = 8
+SCRIPTS_PER_PAGE = 5
+
 app = FastAPI()
 telegram_app = Application.builder().token(TOKEN).build()
 
 
 def clean(value) -> str:
     return str(value or "").replace("\ufeff", "").strip().lower()
+
+
+def clean_keys(row: dict) -> dict:
+    return {
+        clean(key): value
+        for key, value in row.items()
+    }
 
 
 async def is_subscribed(user_id: int) -> bool:
@@ -52,7 +67,9 @@ async def load_scripts() -> list[dict]:
 
     scripts = []
 
-    for row in reader:
+    for raw_row in reader:
+        row = clean_keys(raw_row)
+
         game = clean(row.get("game"))
         title = clean(row.get("title"))
         link = clean(row.get("link"))
@@ -69,6 +86,101 @@ async def load_scripts() -> list[dict]:
     logger.info("Загружено строк: %s", len(scripts))
 
     return scripts
+
+
+async def get_active_games() -> list[str]:
+    scripts = await load_scripts()
+
+    return sorted({
+        item["game"]
+        for item in scripts
+        if item["active"] and item["game"]
+    })
+
+
+def games_keyboard(games: list[str], page: int = 0) -> InlineKeyboardMarkup:
+    start = page * GAMES_PER_PAGE
+    end = start + GAMES_PER_PAGE
+    page_games = games[start:end]
+
+    buttons = []
+
+    for game in page_games:
+        buttons.append([
+            InlineKeyboardButton(
+                game.title(),
+                callback_data=f"game:{page}:{game}"
+            )
+        ])
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"games_page:{page - 1}"
+            )
+        )
+
+    if end < len(games):
+        navigation.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"games_page:{page + 1}"
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    return InlineKeyboardMarkup(buttons)
+
+
+async def send_games_page(
+    update_or_query,
+    page: int = 0,
+    edit: bool = False,
+):
+    try:
+        games = await get_active_games()
+    except Exception:
+        logger.exception("Ошибка чтения Google Таблицы")
+
+        text = "Не удалось загрузить список игр. Попробуй позже."
+        keyboard = None
+
+        if edit:
+            await update_or_query.edit_message_text(
+                text,
+                reply_markup=keyboard,
+            )
+        else:
+            await update_or_query.message.reply_text(text)
+
+        return
+
+    if not games:
+        text = "Пока нет доступных игр."
+        keyboard = None
+    else:
+        total_pages = math.ceil(len(games) / GAMES_PER_PAGE)
+        text = (
+            f"Выбери игру:\n\n"
+            f"Страница {page + 1} из {total_pages}"
+        )
+        keyboard = games_keyboard(games, page)
+
+    if edit:
+        await update_or_query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+        )
+    else:
+        await update_or_query.message.reply_text(
+            text,
+            reply_markup=keyboard,
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,10 +211,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Привет!\n\n"
-        "Отправь команду в формате:\n"
-        "/script blox fruits\n\n"
-        "Я пришлю список доступных скриптов."
+        "Выбери игру кнопкой или отправь команду:\n"
+        "/script blox fruits"
     )
+
+    await send_games_page(update, page=0)
+
+
+async def games(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_games_page(update, page=0)
+
+
+async def games_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    page = int(query.data.replace("games_page:", "", 1))
+    await send_games_page(query, page=page, edit=True)
 
 
 async def check_subscription(
@@ -114,9 +239,10 @@ async def check_subscription(
     if await is_subscribed(query.from_user.id):
         await query.edit_message_text(
             "Спасибо за подписку!\n\n"
-            "Теперь отправь команду:\n"
+            "Теперь выбери игру или отправь команду:\n"
             "/script blox fruits"
         )
+        await send_games_page(update, page=0)
     else:
         await query.answer(
             "Пока не вижу подписку. Подпишись и попробуй снова.",
@@ -145,7 +271,7 @@ async def script(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    game = " ".join(context.args).strip().lower()
+    game_query = " ".join(context.args).strip().lower()
 
     try:
         scripts = await load_scripts()
@@ -158,63 +284,242 @@ async def script(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     found = [
         item for item in scripts
-        if item["game"] == game and item["active"]
+        if item["game"] == game_query and item["active"]
     ]
 
-    logger.info("Найдено скриптов: %s", len(found))
-
     if not found:
-        await update.message.reply_text(
-            f"По запросу «{game}» скрипты не найдены.\n"
-            "Проверь название или попробуй позже."
-        )
+        available = sorted({
+            item["game"]
+            for item in scripts
+            if item["active"] and item["game"]
+        })
+
+        similar = [
+            game for game in available
+            if game and (
+                game in game_query
+                or game_query in game
+            )
+        ]
+
+        if similar:
+            await update.message.reply_text(
+                f"По запросу «{game_query}» ничего не найдено.\n"
+                "Возможно, ты имел в виду:",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            game.title(),
+                            callback_data=f"game:0:{game}"
+                        )
+                    ]
+                    for game in similar[:10]
+                ])
+            )
+        else:
+            await update.message.reply_text(
+                f"По запросу «{game_query}» скрипты не найдены.\n"
+                "Отправь /games, чтобы увидеть доступные игры."
+            )
+
         return
 
-    text = f"Скрипты для {game}:\n\n"
-
-    for item in found:
-        text += f"{item['title']}\n{item['link']}\n\n"
-
-    await update.message.reply_text(
-        text,
-        disable_web_page_preview=True,
+    await send_scripts_page(
+        update,
+        game_query,
+        found,
+        page=0,
     )
 
 
-async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def game_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.replace("game:", "", 1)
+    page_text, game = data.split(":", 1)
+    page = int(page_text)
+    user_id = query.from_user.id
+
+    if not await is_subscribed(user_id):
+        await query.message.reply_text(
+            f"Сначала подпишись на канал: "
+            f"https://t.me/{CHANNEL.lstrip('@')}"
+        )
+        return
+
     try:
-        async with httpx.AsyncClient(
-            timeout=15,
-            follow_redirects=True
-        ) as client:
-            response = await client.get(SHEET_CSV_URL)
-            response.raise_for_status()
+        scripts = await load_scripts()
+    except Exception:
+        logger.exception("Ошибка чтения Google Таблицы")
+        await query.message.reply_text(
+            "Не удалось загрузить скрипты. Попробуй позже."
+        )
+        return
 
-        csv_text = response.text
-        reader = csv.DictReader(io.StringIO(csv_text))
-        rows = list(reader)
+    found = [
+        item for item in scripts
+        if item["game"] == game and item["active"]
+    ]
 
-        columns = list(rows[0].keys()) if rows else []
-        first_row = rows[0] if rows else {}
+    if not found:
+        await query.message.reply_text(
+            f"Для игры «{game}» пока нет доступных скриптов."
+        )
+        return
 
-        await update.message.reply_text(
-            "Первые 1500 символов CSV:\n\n"
-            f"{csv_text[:1500]}\n\n"
-            f"Колонки: {columns}\n\n"
-            f"Всего строк: {len(rows)}\n\n"
-            f"Первая строка: {first_row}"
+    await send_scripts_page(
+        query,
+        game,
+        found,
+        page=0,
+        edit=True,
+    )
+
+
+def scripts_keyboard(
+    game: str,
+    total_pages: int,
+    page: int,
+) -> InlineKeyboardMarkup:
+    buttons = []
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️ Назад",
+                callback_data=f"scripts_page:{game}:{page - 1}"
+            )
         )
 
-    except Exception as error:
-        logger.exception("Ошибка команды /debug")
-        await update.message.reply_text(f"Ошибка: {error}")
+    if page + 1 < total_pages:
+        navigation.append(
+            InlineKeyboardButton(
+                "Вперёд ➡️",
+                callback_data=f"scripts_page:{game}:{page + 1}"
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🎮 К списку игр",
+            callback_data="games_page:0"
+        )
+    ])
+
+    return InlineKeyboardMarkup(buttons)
+
+
+async def send_scripts_page(
+    update_or_query,
+    game: str,
+    scripts: list[dict],
+    page: int = 0,
+    edit: bool = False,
+):
+    total_pages = max(1, math.ceil(len(scripts) / SCRIPTS_PER_PAGE))
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * SCRIPTS_PER_PAGE
+    end = start + SCRIPTS_PER_PAGE
+    page_scripts = scripts[start:end]
+
+    text = f"Скрипты для {game}:\n\n"
+    text += f"Страница {page + 1} из {total_pages}\n\n"
+
+    for item in page_scripts:
+        text += f"{item['title']}\n{item['link']}\n\n"
+
+    keyboard = scripts_keyboard(game, total_pages, page)
+
+    if edit:
+        await update_or_query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    else:
+        await update_or_query.message.reply_text(
+            text,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+
+
+async def scripts_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.replace("scripts_page:", "", 1)
+    game, page_text = data.rsplit(":", 1)
+    page = int(page_text)
+
+    try:
+        scripts = await load_scripts()
+    except Exception:
+        logger.exception("Ошибка чтения Google Таблицы")
+        await query.edit_message_text(
+            "Не удалось загрузить скрипты. Попробуй позже."
+        )
+        return
+
+    found = [
+        item for item in scripts
+        if item["game"] == game and item["active"]
+    ]
+
+    if not found:
+        await query.edit_message_text(
+            f"Для игры «{game}» пока нет доступных скриптов."
+        )
+        return
+
+    await send_scripts_page(
+        query,
+        game,
+        found,
+        page=page,
+        edit=True,
+    )
+
+
+async def help_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    await update.message.reply_text(
+        "Как пользоваться ботом:\n\n"
+        "/start — главное меню и выбор игры\n"
+        "/games — список доступных игр\n"
+        "/script blox fruits — найти скрипты по названию\n"
+        "/help — эта справка\n\n"
+        "Пример:\n"
+        "/script blox fruits"
+    )
 
 
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("games", games))
 telegram_app.add_handler(CommandHandler("script", script))
-telegram_app.add_handler(CommandHandler("debug", debug))
+telegram_app.add_handler(CommandHandler("help", help_command))
+
 telegram_app.add_handler(
     CallbackQueryHandler(check_subscription, pattern="^check_sub$")
+)
+telegram_app.add_handler(
+    CallbackQueryHandler(games_page, pattern="^games_page:")
+)
+telegram_app.add_handler(
+    CallbackQueryHandler(game_button, pattern="^game:")
+)
+telegram_app.add_handler(
+    CallbackQueryHandler(scripts_page, pattern="^scripts_page:")
 )
 
 
@@ -234,5 +539,13 @@ async def webhook(request: Request):
 @app.on_event("startup")
 async def on_startup():
     await telegram_app.initialize()
+
+    await telegram_app.bot.set_my_commands([
+        BotCommand("start", "Главное меню"),
+        BotCommand("games", "Список доступных игр"),
+        BotCommand("script", "Найти скрипты: /script blox fruits"),
+        BotCommand("help", "Как пользоваться ботом"),
+    ])
+
     await telegram_app.bot.set_webhook(f"{RENDER_URL}/webhook")
     await telegram_app.start()
