@@ -600,7 +600,7 @@ async def script_details(
         f"<b>Нужен ключ:</b> {key_text}\\n"
         f"<b>Инжектор:</b> {item['injector']}\\n"
         f"<b>Мобильные:</b> {mobile_text}\\n\\n"
-        f"<a href=\\"{item['link']}\\">Открыть скрипт</a>"
+        f"<a href='{item['link']}'>Открыть скрипт</a>"
     )
 
     await query.message.reply_text(
