@@ -29,7 +29,10 @@ async def is_subscribed(user_id: int) -> bool:
 
 
 async def load_scripts() -> list[dict]:
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(
+    timeout=15,
+    follow_redirects=True
+) as client:
         response = await client.get(SHEET_CSV_URL)
         response.raise_for_status()
 
